@@ -42,14 +42,14 @@ func TestHTTPStatsTLSProtocol(t *testing.T) {
 		TLSConfig: tlsConfigBasic,
 	}, nil)
 
-	l.Init(nil)
+	_ = l.Init(logger)
 	require.Equal(t, "https", l.Protocol())
 }
 
 func TestHTTPStatsInit(t *testing.T) {
 	sysInfo := new(system.Info)
 	l := NewHTTPStats("t1", testAddr, nil, sysInfo)
-	err := l.Init(nil)
+	err := l.Init(logger)
 	require.NoError(t, err)
 
 	require.NotNil(t, l.sysInfo)
@@ -65,7 +65,7 @@ func TestHTTPStatsServeAndClose(t *testing.T) {
 
 	// setup http stats listener
 	l := NewHTTPStats("t1", testAddr, nil, sysInfo)
-	err := l.Init(nil)
+	err := l.Init(logger)
 	require.NoError(t, err)
 
 	o := make(chan bool)
@@ -113,7 +113,7 @@ func TestHTTPStatsServeTLSAndClose(t *testing.T) {
 		TLSConfig: tlsConfigBasic,
 	}, sysInfo)
 
-	err := l.Init(nil)
+	err := l.Init(logger)
 	require.NoError(t, err)
 
 	o := make(chan bool)
@@ -124,4 +124,29 @@ func TestHTTPStatsServeTLSAndClose(t *testing.T) {
 
 	time.Sleep(time.Millisecond)
 	l.Close(MockCloser)
+}
+
+func TestHTTPStatsFailedToServe(t *testing.T) {
+	sysInfo := &system.Info{
+		Version: "test",
+	}
+
+	// setup http stats listener
+	l := NewHTTPStats("t1", "wrong_addr", nil, sysInfo)
+	err := l.Init(logger)
+	require.NoError(t, err)
+
+	o := make(chan bool)
+	go func(o chan bool) {
+		l.Serve(MockEstablisher)
+		o <- true
+	}(o)
+
+	<-o
+	// ensure listening is closed
+	var closed bool
+	l.Close(func(id string) {
+		closed = true
+	})
+	require.Equal(t, true, closed)
 }

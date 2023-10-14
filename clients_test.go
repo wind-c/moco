@@ -5,10 +5,14 @@
 package mqtt
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -29,7 +33,7 @@ func newTestClient() (cl *Client, r net.Conn, w net.Conn) {
 	cl = newClient(w, &ops{
 		info:  new(system.Info),
 		hooks: new(Hooks),
-		log:   &logger,
+		log:   logger,
 		options: &Options{
 			Capabilities: &Capabilities{
 				ReceiveMaximum:             10,
@@ -210,6 +214,27 @@ func TestClientParseConnectNoID(t *testing.T) {
 	require.NotEmpty(t, cl.ID)
 }
 
+func TestClientParseConnectBelowMinimumKeepalive(t *testing.T) {
+	cl, _, _ := newTestClient()
+	var b bytes.Buffer
+	x := bufio.NewWriter(&b)
+	cl.ops.log = slog.New(slog.NewTextHandler(x, nil))
+
+	pk := packets.Packet{
+		ProtocolVersion: 4,
+		Connect: packets.ConnectParams{
+			ProtocolName:     []byte{'M', 'Q', 'T', 'T'},
+			Keepalive:        minimumKeepalive - 1,
+			ClientIdentifier: "mochi",
+		},
+	}
+	cl.ParseConnect("tcp1", pk)
+	err := x.Flush()
+	require.NoError(t, err)
+	require.True(t, strings.Contains(b.String(), ErrMinimumKeepalive.Error()))
+	require.NotEmpty(t, cl.ID)
+}
+
 func TestClientNextPacketID(t *testing.T) {
 	cl, _, _ := newTestClient()
 
@@ -263,7 +288,7 @@ func TestClientNextPacketIDOverflow(t *testing.T) {
 		cl.State.Inflight.internal[uint16(i)] = packets.Packet{}
 	}
 
-	cl.State.packetID = uint32(cl.ops.options.Capabilities.maximumPacketID - 1)
+	cl.State.packetID = cl.ops.options.Capabilities.maximumPacketID - 1
 	i, err := cl.NextPacketID()
 	require.NoError(t, err)
 	require.Equal(t, cl.ops.options.Capabilities.maximumPacketID, i)
@@ -303,7 +328,7 @@ func TestClientResendInflightMessages(t *testing.T) {
 		err := cl.ResendInflightMessages(true)
 		require.NoError(t, err)
 		time.Sleep(time.Millisecond)
-		w.Close()
+		_ = w.Close()
 	}()
 
 	buf, err := io.ReadAll(r)
@@ -315,7 +340,7 @@ func TestClientResendInflightMessages(t *testing.T) {
 func TestClientResendInflightMessagesWriteFailure(t *testing.T) {
 	pk1 := packets.TPacketData[packets.Publish].Get(packets.TPublishQos1Dup)
 	cl, r, _ := newTestClient()
-	r.Close()
+	_ = r.Close()
 
 	cl.State.Inflight.Set(*pk1.Packet)
 	require.Equal(t, 1, cl.State.Inflight.Len())
@@ -342,8 +367,8 @@ func TestClientReadFixedHeader(t *testing.T) {
 
 	defer cl.Stop(errClientStop)
 	go func() {
-		r.Write([]byte{packets.Connect << 4, 0x00})
-		r.Close()
+		_, _ = r.Write([]byte{packets.Connect << 4, 0x00})
+		_ = r.Close()
 	}()
 
 	fh := new(packets.FixedHeader)
@@ -357,8 +382,8 @@ func TestClientReadFixedHeaderDecodeError(t *testing.T) {
 	defer cl.Stop(errClientStop)
 
 	go func() {
-		r.Write([]byte{packets.Connect<<4 | 1<<1, 0x00, 0x00})
-		r.Close()
+		_, _ = r.Write([]byte{packets.Connect<<4 | 1<<1, 0x00, 0x00})
+		_ = r.Close()
 	}()
 
 	fh := new(packets.FixedHeader)
@@ -372,8 +397,8 @@ func TestClientReadFixedHeaderPacketOversized(t *testing.T) {
 	defer cl.Stop(errClientStop)
 
 	go func() {
-		r.Write(packets.TPacketData[packets.Publish].Get(packets.TPublishQos1Dup).RawBytes)
-		r.Close()
+		_, _ = r.Write(packets.TPacketData[packets.Publish].Get(packets.TPublishQos1Dup).RawBytes)
+		_ = r.Close()
 	}()
 
 	fh := new(packets.FixedHeader)
@@ -387,7 +412,7 @@ func TestClientReadFixedHeaderReadEOF(t *testing.T) {
 	defer cl.Stop(errClientStop)
 
 	go func() {
-		r.Close()
+		_ = r.Close()
 	}()
 
 	fh := new(packets.FixedHeader)
@@ -401,8 +426,8 @@ func TestClientReadFixedHeaderNoLengthTerminator(t *testing.T) {
 	defer cl.Stop(errClientStop)
 
 	go func() {
-		r.Write([]byte{packets.Connect << 4, 0xd5, 0x86, 0xf9, 0x9e, 0x01})
-		r.Close()
+		_, _ = r.Write([]byte{packets.Connect << 4, 0xd5, 0x86, 0xf9, 0x9e, 0x01})
+		_ = r.Close()
 	}()
 
 	fh := new(packets.FixedHeader)
@@ -414,7 +439,7 @@ func TestClientReadOK(t *testing.T) {
 	cl, r, _ := newTestClient()
 	defer cl.Stop(errClientStop)
 	go func() {
-		r.Write([]byte{
+		_, _ = r.Write([]byte{
 			packets.Publish << 4, 18, // Fixed header
 			0, 5, // Topic Name - LSB+MSB
 			'a', '/', 'b', '/', 'c', // Topic Name
@@ -424,7 +449,7 @@ func TestClientReadOK(t *testing.T) {
 			'd', '/', 'e', '/', 'f', // Topic Name
 			'y', 'e', 'a', 'h', // Payload
 		})
-		r.Close()
+		_ = r.Close()
 	}()
 
 	var pks []packets.Packet
@@ -499,10 +524,10 @@ func TestClientReadFixedHeaderError(t *testing.T) {
 	cl, r, _ := newTestClient()
 	defer cl.Stop(errClientStop)
 	go func() {
-		r.Write([]byte{
+		_, _ = r.Write([]byte{
 			packets.Publish << 4, 11, // Fixed header
 		})
-		r.Close()
+		_ = r.Close()
 	}()
 
 	cl.Net.bconn = nil
@@ -516,13 +541,13 @@ func TestClientReadReadHandlerErr(t *testing.T) {
 	cl, r, _ := newTestClient()
 	defer cl.Stop(errClientStop)
 	go func() {
-		r.Write([]byte{
+		_, _ = r.Write([]byte{
 			packets.Publish << 4, 11, // Fixed header
 			0, 5, // Topic Name - LSB+MSB
 			'd', '/', 'e', '/', 'f', // Topic Name
 			'y', 'e', 'a', 'h', // Payload
 		})
-		r.Close()
+		_ = r.Close()
 	}()
 
 	err := cl.Read(func(cl *Client, pk packets.Packet) error {
@@ -536,13 +561,13 @@ func TestClientReadReadPacketOK(t *testing.T) {
 	cl, r, _ := newTestClient()
 	defer cl.Stop(errClientStop)
 	go func() {
-		r.Write([]byte{
+		_, _ = r.Write([]byte{
 			packets.Publish << 4, 11, // Fixed header
 			0, 5,
 			'd', '/', 'e', '/', 'f',
 			'y', 'e', 'a', 'h',
 		})
-		r.Close()
+		_ = r.Close()
 	}()
 
 	fh := new(packets.FixedHeader)
@@ -573,7 +598,7 @@ func TestClientReadPacket(t *testing.T) {
 		t.Run(tt.Desc, func(t *testing.T) {
 			atomic.StoreInt64(&cl.ops.info.PacketsReceived, 0)
 			go func() {
-				r.Write(tt.RawBytes)
+				_, _ = r.Write(tt.RawBytes)
 			}()
 
 			fh := new(packets.FixedHeader)
@@ -600,7 +625,7 @@ func TestClientReadPacket(t *testing.T) {
 
 func TestClientReadPacketInvalidTypeError(t *testing.T) {
 	cl, _, _ := newTestClient()
-	cl.Net.Conn.Close()
+	_ = cl.Net.Conn.Close()
 	_, err := cl.ReadPacket(&packets.FixedHeader{})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid packet type")
@@ -624,7 +649,7 @@ func TestClientWritePacket(t *testing.T) {
 		require.NoError(t, err, pkInfo, tt.Case, tt.Desc)
 
 		time.Sleep(2 * time.Millisecond)
-		cl.Net.Conn.Close()
+		_ = cl.Net.Conn.Close()
 
 		require.Equal(t, tt.RawBytes, <-o, pkInfo, tt.Case, tt.Desc)
 
@@ -660,13 +685,13 @@ func TestClientReadPacketReadingError(t *testing.T) {
 	cl, r, _ := newTestClient()
 	defer cl.Stop(errClientStop)
 	go func() {
-		r.Write([]byte{
+		_, _ = r.Write([]byte{
 			0, 11, // Fixed header
 			0, 5,
 			'd', '/', 'e', '/', 'f',
 			'y', 'e', 'a', 'h',
 		})
-		r.Close()
+		_ = r.Close()
 	}()
 
 	_, err := cl.ReadPacket(&packets.FixedHeader{
@@ -680,13 +705,13 @@ func TestClientReadPacketReadUnknown(t *testing.T) {
 	cl, r, _ := newTestClient()
 	defer cl.Stop(errClientStop)
 	go func() {
-		r.Write([]byte{
+		_, _ = r.Write([]byte{
 			0, 11, // Fixed header
 			0, 5,
 			'd', '/', 'e', '/', 'f',
 			'y', 'e', 'a', 'h',
 		})
-		r.Close()
+		_ = r.Close()
 	}()
 
 	_, err := cl.ReadPacket(&packets.FixedHeader{
@@ -706,7 +731,7 @@ func TestClientWritePacketWriteNoConn(t *testing.T) {
 
 func TestClientWritePacketWriteError(t *testing.T) {
 	cl, _, _ := newTestClient()
-	cl.Net.Conn.Close()
+	_ = cl.Net.Conn.Close()
 
 	err := cl.WritePacket(*pkTable[1].Packet)
 	require.Error(t, err)

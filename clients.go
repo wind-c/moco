@@ -8,6 +8,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -21,8 +22,13 @@ import (
 )
 
 const (
-	defaultKeepalive             uint16 = 10 // the default connection keepalive value in seconds
+	defaultKeepalive             uint16 = 10 // the default connection keepalive value in seconds.
 	defaultClientProtocolVersion byte   = 4  // the default mqtt protocol version of connecting clients (if somehow unspecified).
+	minimumKeepalive             uint16 = 5  // the minimum recommended keepalive - values under with display a warning.
+)
+
+var (
+	ErrMinimumKeepalive = errors.New("client keepalive is below minimum recommended value and may exhibit connection instability")
 )
 
 // ReadFn is the function signature for the function used for reading and processing new packets.
@@ -99,7 +105,7 @@ func (cl *Clients) GetByListener(id string) []*Client {
 type Client struct {
 	Properties   ClientProperties // client properties
 	State        ClientState      // the operational state of the client.
-	Net          ClientConnection // network connection state of the clinet
+	Net          ClientConnection // network connection state of the client
 	ID           string           // the client id.
 	ops          *ops             // ops provides a reference to server ops.
 	sync.RWMutex                  // mutex
@@ -111,7 +117,7 @@ type ClientConnection struct {
 	bconn    *bufio.ReadWriter // a buffered net.Conn for reading packets
 	Remote   string            // the remote address of the client
 	Listener string            // listener id of the client
-	Inline   bool              // client is an inline programmetic client
+	Inline   bool              // if true, the client is the built-in 'inline' embedded client
 }
 
 // ClientProperties contains the properties which define the client behaviour.
@@ -134,7 +140,7 @@ type Will struct {
 	Retain            bool                   // -
 }
 
-// State tracks the state of the client.
+// ClientState tracks the state of the client.
 type ClientState struct {
 	TopicAliases    TopicAliases         // a map of topic aliases
 	stopCause       atomic.Value         // reason for stopping
@@ -192,7 +198,8 @@ func (cl *Client) WriteLoop() {
 		select {
 		case pk := <-cl.State.outbound:
 			if err := cl.WritePacket(*pk); err != nil {
-				cl.ops.log.Debug().Err(err).Str("client", cl.ID).Interface("packet", pk).Msg("failed publishing packet")
+				// TODO : Figure out what to do with error
+				cl.ops.log.Debug("failed publishing packet", "error", err, "client", cl.ID, "packet", pk)
 			}
 			atomic.AddInt32(&cl.State.outboundQty, -1)
 		case <-cl.State.open.Done():
@@ -209,6 +216,15 @@ func (cl *Client) ParseConnect(lid string, pk packets.Packet) {
 	cl.Properties.Username = pk.Connect.Username
 	cl.Properties.Clean = pk.Connect.Clean
 	cl.Properties.Props = pk.Properties.Copy(false)
+
+	if pk.Connect.Keepalive <= minimumKeepalive {
+		cl.ops.log.Warn(
+			ErrMinimumKeepalive.Error(),
+			"client", cl.ID,
+			"keepalive", pk.Connect.Keepalive,
+			"recommended", minimumKeepalive,
+		)
+	}
 
 	cl.State.Keepalive = pk.Connect.Keepalive                                              // [MQTT-3.2.2-22]
 	cl.State.Inflight.ResetReceiveQuota(int32(cl.ops.options.Capabilities.ReceiveMaximum)) // server receive max per client
@@ -310,7 +326,7 @@ func (cl *Client) ResendInflightMessages(force bool) error {
 	return nil
 }
 
-// ClearInflights deletes all inflight messages for the client, eg. for a disconnected user with a clean session.
+// ClearInflights deletes all inflight messages for the client, e.g. for a disconnected user with a clean session.
 func (cl *Client) ClearInflights(now, maximumExpiry int64) []uint16 {
 	deleted := []uint16{}
 	for _, tk := range cl.State.Inflight.GetAll(false) {
